@@ -26,7 +26,7 @@ from keras import backend as K
 import tensorflow as tf
 
 # Set some parameters
-IMG_WIDTH, IMG_HEIGHT, IMG_CHANNELS = 128, 128, 3
+IMG_WIDTH, IMG_HEIGHT, IMG_CHANNELS = 256, 256, 3
 TRAIN_PATH = '../input/stage1_train/'
 #For first stage used TEST_PATH = '../input/stage1_test/'
 TEST_PATH = '../input/stage2_test_final/'
@@ -43,10 +43,21 @@ Y_train = np.zeros((len(train_ids), IMG_HEIGHT, IMG_WIDTH, 1), dtype=np.bool)
 print('Getting and resizing train images and masks ... ')
 sys.stdout.flush()
 
-#tqdm prints a loop status 8every 30 sec)
+#In some images RGB range is very compressed, 
+def scale_img_canals(an_img):
+    for i in range(IMG_CHANNELS):
+        canal = an_img[:,:,i]
+        canal = canal - canal.min()
+        canalmax = canal.max()
+        if canalmax > 0:
+            factor = 255/canalmax
+            canal = (canal * factor).astype(int)
+        an_img[:,:,i] = canal
+
+#tqdm prints a loop status (every 30 sec)
 for n, id_ in tqdm(enumerate(train_ids), total=len(train_ids), mininterval=30):
     path = TRAIN_PATH + id_
-    img = imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS]
+    img = scale_img_canals(imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS])
     img = resize(img, (IMG_HEIGHT, IMG_WIDTH), mode='constant', preserve_range=True)
     X_train[n] = img
     mask = np.zeros((IMG_HEIGHT, IMG_WIDTH, 1), dtype=np.bool)
@@ -67,7 +78,7 @@ for n, id_ in tqdm(enumerate(test_ids), total=len(test_ids)):
     path = TEST_PATH + id_
     #on stage 2 a couple of pictures were not on RGB (only one dimension) - I decided not to analyze them
     try:
-      img = imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS]
+      img = scale_img_canals(imread(path + '/images/' + id_ + '.png')[:,:,:IMG_CHANNELS])
     except:
       img = imread(path + '/images/' + id_ + '.png')
       sizes_test.append([img.shape[0], img.shape[1]])
@@ -86,18 +97,13 @@ imshow(np.squeeze(Y_train[ix]))
 plt.show()
 
 
-# Define IoU metric - true positive / (true positive + false positive + false negative)
-def mean_iou(y_true, y_pred):
-    prec = []
-    for t in np.arange(0.5, 1.0, 0.05):
-        y_pred_ = tf.to_int32(y_pred > t)
-        score, up_opt = tf.metrics.mean_iou(y_true, y_pred_, 2)
-        K.get_session().run(tf.local_variables_initializer())
-        with tf.control_dependencies([up_opt]):
-            score = tf.identity(score)
-        prec.append(score)
-    return K.mean(K.stack(prec), axis=0)
-    
+# My definition of IoU was not working, using dice metric from https://github.com/kamalkraj/DATA-SCIENCE-BOWL-2018/blob/master/model.py
+def dice_coef_less(y_true, y_pred):
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    intersection = K.sum(y_true_f * y_pred_f)
+    return -(2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
+
     
 # Build U-Net model - not really my specialty so I relied on this paper: http://www.cs.cmu.edu/~jeanoh/16-785/papers/ronnenberger-miccai2015-u-net.pdfand on code posted on Kaggle
 #The contracting path follows the typical architecture of a convolutional network. It consists of the repeated application of two 3x3 convolutions (unpadded convolutions), each followed by a rectified linear unit (ReLU) and a 2x2 max pooling operation with stride 2 for downsampling. At each downsampling step we double the number of feature channels.
@@ -146,7 +152,7 @@ c9 = Conv2D(8, (3, 3), activation='relu', padding='same') (c9)
 outputs = Conv2D(1, (1, 1), activation='sigmoid') (c9)
 
 model = Model(inputs=[inputs], outputs=[outputs])
-model.compile(optimizer='adam', loss='binary_crossentropy', metrics=[mean_iou])
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=[dice_coef_less])
 model.summary()
 
 
@@ -175,7 +181,6 @@ for i in range(len(preds_test)):
                                        (sizes_test[i][0], sizes_test[i][1]), 
                                        mode='constant', preserve_range=True))
 
-
 # Run-length encoding stolen from https://www.kaggle.com/rakhlin/fast-run-length-encoding-python
 def rle_encoding(x):
     dots = np.where(x.T.flatten() == 1)[0]
@@ -191,9 +196,6 @@ def prob_to_rles(x, cutoff=0.5):
     lab_img = label(x > cutoff)
     for i in range(1, lab_img.max() + 1):
         yield rle_encoding(lab_img == i)
-        
-        
-        
 
 new_test_ids = []
 rles = []
@@ -201,7 +203,6 @@ for n, id_ in enumerate(test_ids):
     rle = list(prob_to_rles(preds_test_upsampled[n]))
     rles.extend(rle)
     new_test_ids.extend([id_] * len(rle))
-    
     
 # Create submission DataFrame
 sub = pd.DataFrame()
